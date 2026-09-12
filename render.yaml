@@ -1,9 +1,4 @@
 services:
-  - type: redis
-    name: savivah-redis-fs
-    plan: free
-    ipAllowList: []
-
   - type: web
     name: savivah-backend-firestore
     runtime: python
@@ -15,10 +10,7 @@ services:
       - key: PYTHON_VERSION
         value: "3.12.7"
       - key: REDIS_URL
-        fromService:
-          type: redis
-          name: savivah-redis-fs
-          property: connectionString
+        sync: false
       - key: JWT_SECRET
         generateValue: true
       - key: ADMIN_JWT_SECRET
