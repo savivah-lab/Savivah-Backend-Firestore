@@ -1,0 +1,17 @@
+rules_version = '2';
+
+// Every read/write in this project goes through the backend using the
+// Firebase Admin SDK (google-cloud-firestore with a service account),
+// which BYPASSES these rules entirely — they don't do anything for the
+// backend's own access. This file exists purely as a safety net: if
+// anyone ever adds a client-side Firebase SDK to the frontend later
+// (instead of going through the backend API, which is the intended
+// design), this locks that down to nothing until rules are deliberately
+// written for it.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
