@@ -30,21 +30,32 @@ async def register(body: RegisterRequest, db=Depends(get_db)):
     }
 
     @async_transactional
-    async def create_user(transaction):
-        try:
-            await claim_unique(transaction, db, "user_emails", body.email, uid, "email")
-            await claim_unique(transaction, db, "user_phones", body.phoneNumber, uid, "phone number")
-        except UniquenessError:
-            raise
-        transaction.set(db.collection("users").document(uid), user_doc)
+async def create_user(transaction):
+    email_ref = await claim_unique(
+        transaction,
+        db,
+        "user_emails",
+        body.email,
+        uid,
+        "email",
+    )
 
-    transaction = db.transaction()
-    try:
-        await create_user(transaction)
-    except UniquenessError:
-        raise HTTPException(status_code=409, detail="Email or phone already registered")
+    phone_ref = await claim_unique(
+        transaction,
+        db,
+        "user_phones",
+        body.phoneNumber,
+        uid,
+        "phone number",
+    )
 
-    return _issue({**user_doc, "id": uid})
+    # All reads are complete. Now perform the writes.
+    transaction.set(email_ref, {"id": uid})
+    transaction.set(phone_ref, {"id": uid})
+    transaction.set(
+        db.collection("users").document(uid),
+        user_doc,
+    )
 
 
 @router.post("/login", response_model=TokenResponse, dependencies=[Depends(rate_limit("login"))])
