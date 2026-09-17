@@ -160,16 +160,7 @@ async def list_products(
             )
         )
 
-    # ---------------------------------------------------------
-    # Category
-    # ---------------------------------------------------------
 
-    if category_value:
-        query = query.where(
-            "category",
-            "==",
-            category_value,
-        )
 
     # ---------------------------------------------------------
     # Cursor
@@ -205,14 +196,15 @@ async def list_products(
     # ---------------------------------------------------------
 
     needs_python_filtering = any(
-        [
-            min_price is not None,
-            max_price is not None,
-            in_stock,
-            verified_seller,
-            sort_value in {"price_asc", "price_desc"},
-        ]
-    )
+    [
+        category_value is not None,
+        min_price is not None,
+        max_price is not None,
+        in_stock,
+        verified_seller,
+        sort_value in {"price_asc", "price_desc"},
+    ]
+)
 
     fetch_limit = limit + 1
 
@@ -267,6 +259,18 @@ async def list_products(
                 "created_at": p.get("created_at"),
             }
         )
+
+# ---------------------------------------------------------
+# Category filter
+# ---------------------------------------------------------
+
+if category_value:
+    products = [
+        p
+        for p in products
+        if (p.get("category") or "").strip().lower()
+        == category_value.lower()
+    ]
 
     # ---------------------------------------------------------
     # Price filters
