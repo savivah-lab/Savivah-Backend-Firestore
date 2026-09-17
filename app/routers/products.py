@@ -259,19 +259,19 @@ async def list_products(
                 "created_at": p.get("created_at"),
             }
         )
-
-# ---------------------------------------------------------
+        # ---------------------------------------------------------
 # Category filter
 # ---------------------------------------------------------
 
-if category_value:
-    products = [
-        p
-        for p in products
-        if (p.get("category") or "").strip().lower()
-        == category_value.lower()
-    ]
+     if category_value:
+        products = [
+          p
+          for p in products
+          if (p.get("category") or "").strip().lower()
+          == category_value.lower()
+        ]
 
+    
     # ---------------------------------------------------------
     # Price filters
     # ---------------------------------------------------------
