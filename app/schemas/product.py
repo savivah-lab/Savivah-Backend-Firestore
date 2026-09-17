@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uuid
 
 
@@ -13,6 +13,12 @@ class ProductOut(BaseModel):
     price: float
     stock: int
     image_url: str | None = None
+
+    # All product images.
+    # Existing products without image_urls will still work because
+    # the backend will fall back to image_url.
+    image_urls: list[str] = Field(default_factory=list)
+
     status: str
 
     class Config:
@@ -32,7 +38,12 @@ class ProductCreateRequest(BaseModel):
     category: str | None = None
     price: float
     stock: int
+
+    # Kept for backward compatibility with the current frontend.
     imageUrl: str | None = None
+
+    # New multi-image field.
+    imageUrls: list[str] = Field(default_factory=list)
 
 
 class ProductUpdateRequest(BaseModel):
@@ -41,7 +52,15 @@ class ProductUpdateRequest(BaseModel):
     category: str | None = None
     price: float | None = None
     stock: int | None = None
+
+    # Backward-compatible single image field.
     imageUrl: str | None = None
+
+    # New multi-image field.
+    # None = don't change the images.
+    # [] = remove all images.
+    imageUrls: list[str] | None = None
+
     status: str | None = None
 
 
