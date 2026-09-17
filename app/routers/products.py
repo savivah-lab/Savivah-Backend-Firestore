@@ -3,10 +3,10 @@ Public product catalogue.
 
 Firestore provides:
 - prefix search through name_lower
-- category filtering
 - cursor pagination for browse mode
 
 Additional catalogue filters:
+- category
 - min_price
 - max_price
 - in_stock
@@ -52,10 +52,18 @@ async def list_products(
     search: str | None = Query(default=None),
     category: str | None = Query(default=None),
 
-    min_price: float | None = Query(default=None, ge=0),
-    max_price: float | None = Query(default=None, ge=0),
+    min_price: float | None = Query(
+        default=None,
+        ge=0,
+    ),
+
+    max_price: float | None = Query(
+        default=None,
+        ge=0,
+    ),
 
     in_stock: bool = Query(default=False),
+
     verified_seller: bool = Query(default=False),
 
     sort: str = Query(default="relevance"),
@@ -71,14 +79,14 @@ async def list_products(
     db=Depends(get_db),
     redis=Depends(get_redis),
 ):
-    # ---------------------------------------------------------
+    # =========================================================
     # Normalize inputs
-    # ---------------------------------------------------------
+    # =========================================================
 
     search_value = search.strip() if search else None
     category_value = category.strip() if category else None
 
-    sort_value = (sort or "relevance").lower()
+    sort_value = (sort or "relevance").strip().lower()
 
     allowed_sorts = {
         "relevance",
@@ -90,7 +98,7 @@ async def list_products(
     if sort_value not in allowed_sorts:
         sort_value = "relevance"
 
-    # Avoid an invalid range.
+    # Avoid an invalid price range.
     if (
         min_price is not None
         and max_price is not None
@@ -98,12 +106,11 @@ async def list_products(
     ):
         min_price, max_price = max_price, min_price
 
-    # ---------------------------------------------------------
+    # =========================================================
     # Redis cache
     #
-    # IMPORTANT:
     # Every filter is included in the cache key.
-    # ---------------------------------------------------------
+    # =========================================================
 
     cached = await get_cached_products(
         redis,
@@ -121,33 +128,53 @@ async def list_products(
     if cached:
         return ProductPage(**cached)
 
-    # ---------------------------------------------------------
+    # =========================================================
     # Base Firestore query
-    # ---------------------------------------------------------
+    #
+    # IMPORTANT:
+    # Category is intentionally NOT added to the Firestore query.
+    #
+    # This allows category filtering to happen in Python and avoids
+    # requiring a new Firestore composite index for:
+    #
+    # status + category + ordering
+    # =========================================================
 
-    query = db.collection("products").where(
-        "status",
-        "==",
-        "active",
+    query = (
+        db.collection("products")
+        .where(
+            "status",
+            "==",
+            "active",
+        )
     )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # Search
     #
-    # Firestore does prefix search using name_lower.
-    # ---------------------------------------------------------
+    # Firestore supports prefix search through name_lower.
+    # =========================================================
 
     if search_value:
         term = search_value.lower()
 
         query = (
             query
-            .where("name_lower", ">=", term)
-            .where("name_lower", "<", term + "\uf8ff")
+            .where(
+                "name_lower",
+                ">=",
+                term,
+            )
+            .where(
+                "name_lower",
+                "<",
+                term + "\uf8ff",
+            )
             .order_by("name_lower")
         )
 
     else:
+        # Normal browse ordering.
         query = (
             query
             .order_by(
@@ -160,17 +187,13 @@ async def list_products(
             )
         )
 
-
-
-    # ---------------------------------------------------------
+    # =========================================================
     # Cursor
     #
-    # Existing cursor pagination remains available for the
-    # normal browse view.
+    # Cursor pagination is retained for the normal browse view.
     #
-    # Search continues to work without cursor pagination,
-    # matching the existing behaviour.
-    # ---------------------------------------------------------
+    # Search continues without cursor pagination.
+    # =========================================================
 
     if cursor and not search_value:
         created_at_iso, doc_id = _decode_cursor(cursor)
@@ -186,31 +209,36 @@ async def list_products(
             }
         )
 
-    # ---------------------------------------------------------
-    # Fetch products
-    #
-    # We fetch a larger working set when additional filters or
-    # sorting are requested because those operations are handled
-    # safely in Python rather than requiring new Firestore
-    # composite indexes immediately.
-    # ---------------------------------------------------------
+    # =========================================================
+    # Determine whether Python filtering/sorting is required
+    # =========================================================
 
     needs_python_filtering = any(
-    [
-        category_value is not None,
-        min_price is not None,
-        max_price is not None,
-        in_stock,
-        verified_seller,
-        sort_value in {"price_asc", "price_desc"},
-    ]
-)
+        [
+            category_value is not None,
+            min_price is not None,
+            max_price is not None,
+            in_stock,
+            verified_seller,
+            sort_value in {
+                "price_asc",
+                "price_desc",
+            },
+        ]
+    )
+
+    # =========================================================
+    # Fetch products
+    #
+    # When filters are being applied in Python, fetch a larger
+    # working set so we have enough products to filter.
+    #
+    # The maximum working set is intentionally capped at 500.
+    # =========================================================
 
     fetch_limit = limit + 1
 
     if needs_python_filtering:
-        # Keep this bounded so a large catalogue does not cause
-        # an unreasonably large response.
         fetch_limit = min(
             max(limit * 5, 120),
             500,
@@ -218,63 +246,113 @@ async def list_products(
 
     query = query.limit(fetch_limit)
 
-    docs = [d async for d in query.stream()]
+    docs = [
+        d
+        async for d in query.stream()
+    ]
 
-    # ---------------------------------------------------------
+    # =========================================================
     # Convert Firestore documents
-    # ---------------------------------------------------------
+    # =========================================================
 
     products = []
 
     for d in docs:
         p = d.to_dict()
 
-        price = float(p.get("price", 0))
-        stock = int(p.get("stock", 0))
+        price = float(
+            p.get("price", 0)
+        )
 
+        stock = int(
+            p.get("stock", 0)
+        )
+
+        # Multi-image support.
         image_urls = p.get("image_urls") or []
 
-        # Backward compatibility:
-        # old products may only have image_url.
-        if not image_urls and p.get("image_url"):
-            image_urls = [p["image_url"]]
+        # Backward compatibility for older products.
+        if (
+            not image_urls
+            and p.get("image_url")
+        ):
+            image_urls = [
+                p["image_url"]
+            ]
 
         products.append(
             {
                 "id": d.id,
+
                 "store_id": p["store_id"],
-                "store_name": p.get("store_name"),
-                "store_verified": p.get("store_verified"),
+
+                "store_name": p.get(
+                    "store_name"
+                ),
+
+                "store_verified": p.get(
+                    "store_verified"
+                ),
+
                 "name": p["name"],
-                "description": p.get("description"),
-                "category": p.get("category"),
+
+                "description": p.get(
+                    "description"
+                ),
+
+                "category": p.get(
+                    "category"
+                ),
+
                 "price": price,
+
                 "stock": stock,
+
                 "image_url": (
                     p.get("image_url")
-                    or (image_urls[0] if image_urls else None)
+                    or (
+                        image_urls[0]
+                        if image_urls
+                        else None
+                    )
                 ),
+
                 "image_urls": image_urls[:6],
+
                 "status": p["status"],
-                "created_at": p.get("created_at"),
+
+                "created_at": p.get(
+                    "created_at"
+                ),
             }
         )
-        # ---------------------------------------------------------
-# Category filter
-# ---------------------------------------------------------
 
-     if category_value:
+    # =========================================================
+    # Category filter
+    #
+    # Applied in Python intentionally to avoid Firestore
+    # composite-index requirements.
+    # =========================================================
+
+    if category_value:
+        category_lower = (
+            category_value.lower()
+        )
+
         products = [
-          p
-          for p in products
-          if (p.get("category") or "").strip().lower()
-          == category_value.lower()
+            p
+            for p in products
+            if (
+                (p.get("category") or "")
+                .strip()
+                .lower()
+                == category_lower
+            )
         ]
 
-    
-    # ---------------------------------------------------------
-    # Price filters
-    # ---------------------------------------------------------
+    # =========================================================
+    # Minimum price filter
+    # =========================================================
 
     if min_price is not None:
         products = [
@@ -283,6 +361,10 @@ async def list_products(
             if p["price"] >= min_price
         ]
 
+    # =========================================================
+    # Maximum price filter
+    # =========================================================
+
     if max_price is not None:
         products = [
             p
@@ -290,9 +372,9 @@ async def list_products(
             if p["price"] <= max_price
         ]
 
-    # ---------------------------------------------------------
+    # =========================================================
     # Stock filter
-    # ---------------------------------------------------------
+    # =========================================================
 
     if in_stock:
         products = [
@@ -301,9 +383,9 @@ async def list_products(
             if p["stock"] > 0
         ]
 
-    # ---------------------------------------------------------
+    # =========================================================
     # Verified seller filter
-    # ---------------------------------------------------------
+    # =========================================================
 
     if verified_seller:
         products = [
@@ -312,71 +394,86 @@ async def list_products(
             if p["store_verified"] is True
         ]
 
-    # ---------------------------------------------------------
+    # =========================================================
     # Sorting
-    # ---------------------------------------------------------
+    # =========================================================
 
     if sort_value == "price_asc":
+
         products.sort(
             key=lambda p: p["price"]
         )
 
     elif sort_value == "price_desc":
+
         products.sort(
             key=lambda p: p["price"],
             reverse=True,
         )
 
     elif sort_value == "newest":
+
         products.sort(
-            key=lambda p: p["created_at"]
-            or datetime.min,
+            key=lambda p: (
+                p["created_at"]
+                or datetime.min
+            ),
             reverse=True,
         )
 
-    # relevance keeps the existing Firestore ordering:
-    # search -> name order
-    # browse -> newest order
-
-    # ---------------------------------------------------------
+    # =========================================================
     # Pagination
-    # ---------------------------------------------------------
+    # =========================================================
 
-    has_more = len(products) > limit
+    has_more = (
+        len(products) > limit
+    )
 
     products = products[:limit]
 
-    # ---------------------------------------------------------
+    # =========================================================
     # ProductOut response
-    # ---------------------------------------------------------
+    # =========================================================
 
     items = []
 
     for p in products:
+
         items.append(
             ProductOut(
                 id=p["id"],
                 store_id=p["store_id"],
-                store_name=p["store_name"],
-                store_verified=p["store_verified"],
+                store_name=p[
+                    "store_name"
+                ],
+                store_verified=p[
+                    "store_verified"
+                ],
                 name=p["name"],
-                description=p["description"],
-                category=p["category"],
+                description=p[
+                    "description"
+                ],
+                category=p[
+                    "category"
+                ],
                 price=p["price"],
                 stock=p["stock"],
-                image_url=p["image_url"],
-                image_urls=p["image_urls"],
+                image_url=p[
+                    "image_url"
+                ],
+                image_urls=p[
+                    "image_urls"
+                ],
                 status=p["status"],
             )
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # Next cursor
     #
-    # Keep cursor pagination for the normal browse view.
-    # Filtered/sorted views can be expanded later with dedicated
-    # Firestore indexes if the catalogue becomes large.
-    # ---------------------------------------------------------
+    # Cursor pagination is only safe for the unfiltered browse
+    # view where Firestore ordering and Python ordering are the same.
+    # =========================================================
 
     next_cursor = None
 
@@ -384,39 +481,55 @@ async def list_products(
         has_more
         and products
         and not search_value
-        and sort_value in {"relevance", "newest"}
+        and category_value is None
+        and sort_value in {
+            "relevance",
+            "newest",
+        }
         and min_price is None
         and max_price is None
         and not in_stock
         and not verified_seller
     ):
+
         last = products[-1]
 
-        created_at = last["created_at"]
+        created_at = last[
+            "created_at"
+        ]
 
         if created_at:
-            if hasattr(created_at, "isoformat"):
-                created_at_iso = created_at.isoformat()
+
+            if hasattr(
+                created_at,
+                "isoformat",
+            ):
+                created_at_iso = (
+                    created_at.isoformat()
+                )
+
             else:
-                created_at_iso = str(created_at)
+                created_at_iso = str(
+                    created_at
+                )
 
             next_cursor = _encode_cursor(
                 created_at_iso,
                 last["id"],
             )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # Build response
-    # ---------------------------------------------------------
+    # =========================================================
 
     page = ProductPage(
         items=items,
         next_cursor=next_cursor,
     )
 
-    # ---------------------------------------------------------
-    # Cache
-    # ---------------------------------------------------------
+    # =========================================================
+    # Cache response
+    # =========================================================
 
     await set_cached_products(
         redis,
@@ -424,7 +537,9 @@ async def list_products(
         category_value,
         cursor,
         limit,
-        page.model_dump(mode="json"),
+        page.model_dump(
+            mode="json"
+        ),
         min_price=min_price,
         max_price=max_price,
         in_stock=in_stock,
