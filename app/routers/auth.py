@@ -298,11 +298,10 @@ async def register(
             redis,
         )
     except Exception as exc:
-        # Keep the account so the user can retry from resend-verification.
-        raise HTTPException(
-            status_code=500,
-            detail="Account created, but the verification email could not be sent. Please try again.",
-        ) from exc
+    raise HTTPException(
+        status_code=500,
+        detail=f"Resend email error: {str(exc)}",
+    ) from exc
 
     return _issue(user)
 
