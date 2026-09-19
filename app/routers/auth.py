@@ -1,8 +1,6 @@
-import asyncio
 import os
 import secrets
-import smtplib
-from email.message import EmailMessage
+import resend
 
 from fastapi import APIRouter, Depends, HTTPException
 from google.cloud.firestore import async_transactional
@@ -61,86 +59,66 @@ def _login_otp_key(email: str) -> str:
 # EMAIL
 # ============================================================
 
-def _send_email_sync(
-    recipient: str,
-    subject: str,
-    body: str,
-) -> None:
-    """
-    Sends an email through the SMTP server configured in Render.
+def _get_resend_api_key() -> str:
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
+        raise RuntimeError("RESEND_API_KEY is not configured")
+    return api_key
 
-    Required environment variables:
 
-    SMTP_HOST
-    SMTP_PORT
-    SMTP_USERNAME
-    SMTP_PASSWORD
-    SMTP_FROM_EMAIL
-
-    Example:
-        SMTP_HOST=smtp.gmail.com
-        SMTP_PORT=465
-        SMTP_USERNAME=your-email@gmail.com
-        SMTP_PASSWORD=your-app-password
-        SMTP_FROM_EMAIL=your-email@gmail.com
-    """
-
-    smtp_host = os.getenv("SMTP_HOST")
-    smtp_port = int(os.getenv("SMTP_PORT", "465"))
-    smtp_username = os.getenv("SMTP_USERNAME")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-    smtp_from = os.getenv("SMTP_FROM_EMAIL") or smtp_username
-
-    if not all([
-        smtp_host,
-        smtp_username,
-        smtp_password,
-        smtp_from,
-    ]):
-        raise RuntimeError("SMTP email configuration is incomplete")
-
-    message = EmailMessage()
-    message["Subject"] = subject
-    message["From"] = smtp_from
-    message["To"] = recipient
-    message.set_content(body)
-
-    if smtp_port == 465:
-        with smtplib.SMTP_SSL(
-            smtp_host,
-            smtp_port,
-            timeout=20,
-        ) as server:
-            server.login(
-                smtp_username,
-                smtp_password,
-            )
-            server.send_message(message)
-    else:
-        with smtplib.SMTP(
-            smtp_host,
-            smtp_port,
-            timeout=20,
-        ) as server:
-            server.starttls()
-            server.login(
-                smtp_username,
-                smtp_password,
-            )
-            server.send_message(message)
+def _get_resend_from_email() -> str:
+    return os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev")
 
 
 async def _send_email(
     recipient: str,
     subject: str,
-    body: str,
+    html_body: str,
 ) -> None:
-    await asyncio.to_thread(
-        _send_email_sync,
-        recipient,
-        subject,
-        body,
-    )
+    resend.api_key = _get_resend_api_key()
+
+    result = await resend.Emails.send_async({
+        "from": _get_resend_from_email(),
+        "to": [recipient],
+        "subject": subject,
+        "html": html_body,
+    })
+
+    if getattr(result, "error", None):
+        raise RuntimeError(str(result.error))
+
+
+def _verification_email_html(full_name: str, code: str) -> str:
+    return f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#161513;">
+      <h2>Verify your Savivah account</h2>
+      <p>Hello {full_name},</p>
+      <p>Thank you for creating your Savivah account.</p>
+      <p>Your 6-digit verification code is:</p>
+      <div style="font-size:32px;font-weight:700;letter-spacing:8px;padding:18px;margin:20px 0;background:#FBF1DA;border-radius:8px;text-align:center;color:#9C740F;">
+        {code}
+      </div>
+      <p>This code expires in 10 minutes.</p>
+      <p>If you did not create a Savivah account, you can safely ignore this email.</p>
+      <p>— Savivah Marketplace</p>
+    </div>
+    """
+
+
+def _login_email_html(full_name: str, code: str) -> str:
+    return f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#161513;">
+      <h2>Your Savivah login code</h2>
+      <p>Hello {full_name},</p>
+      <p>Your 6-digit Savivah login code is:</p>
+      <div style="font-size:32px;font-weight:700;letter-spacing:8px;padding:18px;margin:20px 0;background:#FBF1DA;border-radius:8px;text-align:center;color:#9C740F;">
+        {code}
+      </div>
+      <p>This code expires in 10 minutes and can only be used once.</p>
+      <p>If you did not attempt to log in, please secure your account.</p>
+      <p>— Savivah Marketplace</p>
+    </div>
+    """
 
 
 async def _send_verification_code(
@@ -159,15 +137,7 @@ async def _send_verification_code(
     await _send_email(
         email,
         "Verify your Savivah account",
-        (
-            f"Hello {full_name},\n\n"
-            f"Your Savivah verification code is:\n\n"
-            f"{code}\n\n"
-            f"This code expires in 10 minutes.\n\n"
-            f"If you did not create a Savivah account, "
-            f"you can ignore this email.\n\n"
-            f"Savivah Marketplace"
-        ),
+        _verification_email_html(full_name, code),
     )
 
 
@@ -187,16 +157,7 @@ async def _send_login_code(
     await _send_email(
         email,
         "Your Savivah login code",
-        (
-            f"Hello {full_name},\n\n"
-            f"Your Savivah login code is:\n\n"
-            f"{code}\n\n"
-            f"This code expires in 10 minutes and can only "
-            f"be used once.\n\n"
-            f"If you did not attempt to log in, "
-            f"please secure your account.\n\n"
-            f"Savivah Marketplace"
-        ),
+        _login_email_html(full_name, code),
     )
 
 
@@ -336,10 +297,12 @@ async def register(
             body.fullName,
             redis,
         )
-    except Exception:
-        # Account exists, but verification email failed.
-        # Do not delete the account automatically.
-        pass
+    except Exception as exc:
+        # Keep the account so the user can retry from resend-verification.
+        raise HTTPException(
+            status_code=500,
+            detail="Account created, but the verification email could not be sent. Please try again.",
+        ) from exc
 
     return _issue(user)
 
